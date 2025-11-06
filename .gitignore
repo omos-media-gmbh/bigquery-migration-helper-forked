@@ -61,6 +61,6 @@ venv.bak/
 service-account-*.json
 
 # Local data directories (optional - uncomment if you don't want to track data)
-# bucket/
-# bucket_fixed/
-# schemas/
+bucket/
+bucket_fixed/
+schemas/

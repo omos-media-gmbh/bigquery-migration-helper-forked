@@ -1,30 +1,71 @@
 import csv
 import json
 import os
+import re
 from config_loader import get_config
 
 
-# Define a mapping for common data types inference
-def infer_data_type(column_name):
-    # Default to STRING for most fields
+def detect_date_type_from_sample(sample_values):
+    """Detect if date values are DATE or TIMESTAMP by examining sample data."""
+    timestamp_pattern = re.compile(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}")
+    date_only_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+    for value in sample_values:
+        if value and value.strip():
+            value = value.strip()
+            if timestamp_pattern.search(value):
+                return "TIMESTAMP"
+            elif date_only_pattern.match(value):
+                return "DATE"
+
+    return "STRING"
+
+
+def detect_type_column(sample_values):
+    """Detect if 'type' column contains integers or strings."""
+    for value in sample_values:
+        if value and value.strip():
+            value = value.strip()
+            # Check if value is numeric (integer)
+            if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+                return "INTEGER"
+            # If we find a non-numeric value, it's a string
+            else:
+                return "STRING"
+    
+    return "STRING"
+
+
+def infer_data_type(column_name, sample_values=None):
+    """Infer BigQuery data type from column name and sample values."""
     column_name = column_name.lower()
 
-    # Exact date fields (Django DateField)
-    if column_name == "date":
-        return "DATE"
+    # Type field: sample data to distinguish INTEGER vs STRING
+    if column_name == "type":
+        if sample_values:
+            return detect_type_column(sample_values)
+        return "STRING"
 
-    # Date-related fields that should be DATE type
+    # Date fields: sample data to distinguish DATE vs TIMESTAMP
+    elif column_name == "date":
+        if sample_values:
+            return detect_date_type_from_sample(sample_values)
+        return "TIMESTAMP"
+
     elif any(
         date_term == column_name or column_name.endswith(date_term)
         for date_term in ["birth_date", "birth_day", "hidden_at_dashboard", "hidden_at"]
     ):
+        if sample_values:
+            detected_type = detect_date_type_from_sample(sample_values)
+            if detected_type in ["DATE", "TIMESTAMP"]:
+                return detected_type
         return "DATE"
 
-    # Time fields (for meal times)
     elif column_name in ["breakfast", "lunch", "dinner"]:
         return "TIME"
 
-    # Timestamp/datetime related fields (Django DateTimeField)
+    # Timestamp fields
     elif any(
         date_term in column_name
         for date_term in [
@@ -43,37 +84,30 @@ def infer_data_type(column_name):
     ):
         return "TIMESTAMP"
 
-    # Boolean fields - only use for very explicit boolean naming patterns
     elif any(
         bool_term == column_name or column_name.startswith(bool_term)
-        for bool_term in ["is_", "has_", "shake_"]
+        for bool_term in ["is_", "has_", "shake_", "show_"]
     ):
         return "BOOLEAN"
 
-    # Special case for 'active' and 'enabled' only if they're exact matches
     elif column_name in ["active", "enabled"]:
         return "BOOLEAN"
 
-    # Integer fields (Django IntegerField, PositiveSmallIntegerField, etc.)
     elif any(int_term == column_name for int_term in ["gender", "phase", "position"]):
         return "INTEGER"
 
-    # Email fields (Django EmailField)
     elif column_name == "email" or "email" in column_name:
         return "STRING"
 
-    # Relationship fields (Django ForeignKey, ManyToManyField, OneToOneField)
     elif any(
         rel_term in column_name
         for rel_term in ["groups", "permissions", "user_set", "related_"]
     ):
         return "STRING"
 
-    # IDs are always strings in BigQuery for flexibility
     elif column_name == "id" or column_name.endswith("_id"):
         return "STRING"
 
-    # Known problematic fields that should be strings
     elif any(
         term in column_name
         for term in [
@@ -91,7 +125,12 @@ def infer_data_type(column_name):
     ):
         return "STRING"
 
-    # Decimal fields (Django DecimalField)
+    elif any(
+        numeric_term == column_name or column_name.startswith(numeric_term)
+        for numeric_term in ["start_"]
+    ):
+        return "NUMERIC"
+
     elif column_name in [
         "count",
         "amount",
@@ -106,10 +145,6 @@ def infer_data_type(column_name):
         "waist",
         "chest",
         "belly",
-        "start_hip",
-        "start_waist",
-        "start_chest",
-        "start_weight",
         "target_weight",
         "quantity",
         "quantity_one",
@@ -130,48 +165,56 @@ def infer_data_type(column_name):
     ]:
         return "NUMERIC"
 
-    # Integer fields for specific metrics
+    elif any(
+        integer_term == column_name or column_name.startswith(integer_term)
+        for integer_term in ["number_", "number"]
+    ):
+        return "INTEGER"
+
     elif column_name in [
         "sleep",
         "freetime",
         "work",
         "sports",
+        "points",
+        "points_upon_reached",
+        "required_points",
     ]:
         return "INTEGER"
 
-    # Default type
     return "STRING"
 
 
-def get_bigquery_schema(csv_path: str, delimiter=";"):
+def get_bigquery_schema(csv_path: str, delimiter=";", sample_rows=100):
+    """Generate BigQuery schema from CSV file by sampling data."""
     with open(csv_path, "r") as f:
-        # Try to detect if the file uses semicolons instead of commas
         first_line = f.readline().strip()
         if ";" in first_line and "," not in first_line:
             delimiter = ";"
 
-        # Reset file pointer to beginning
         f.seek(0)
-
         reader = csv.reader(f, delimiter=delimiter)
         headers = next(reader)
 
-        # Create schema in BigQuery JSON format
+        # Sample data for type detection
+        sample_data = []
+        for i, row in enumerate(reader):
+            if i >= sample_rows:
+                break
+            sample_data.append(row)
+
         schema = []
-        for header in headers:
+        for col_idx, header in enumerate(headers):
             header = header.strip()
-            if header:  # Skip empty headers
-                data_type = infer_data_type(header)
-                # Default to NULLABLE for most fields, but make ID fields REQUIRED
-                mode = (
-                    "REQUIRED"
-                    if header.lower() == "id" or header.lower().endswith("_id")
-                    else "NULLABLE"
-                )
+            if header:
+                sample_values = [
+                    row[col_idx] if col_idx < len(row) else "" for row in sample_data
+                ]
+                data_type = infer_data_type(header, sample_values)
 
-                # Create field schema object
+                # Only 'id' column is REQUIRED, foreign keys can be nullable
+                mode = "REQUIRED" if header.lower() == "id" else "NULLABLE"
                 field_schema = {"name": header, "type": data_type, "mode": mode}
-
                 schema.append(field_schema)
 
         return schema
@@ -179,21 +222,18 @@ def get_bigquery_schema(csv_path: str, delimiter=";"):
 
 def generate_schemas(bucket_path=None, schema_dir=None):
     """Generate BigQuery schemas from CSV files in the specified bucket path."""
-    # Load config and set defaults
     config = get_config()
     if not bucket_path:
         bucket_path = config.get_local_bucket_dir()
     if not schema_dir:
         schema_dir = config.get_schemas_dir()
-    
+
     print(f"\nBucket path: {bucket_path}")
 
-    # Check if bucket path exists
     if not os.path.isdir(bucket_path):
         print(f"Error: Directory '{bucket_path}' does not exist!")
         return False
 
-    # Get list of CSV files
     csv_files = [f for f in os.listdir(bucket_path) if f.endswith(".csv")]
     print(f"Processing {len(csv_files)} files")
 
@@ -201,16 +241,13 @@ def generate_schemas(bucket_path=None, schema_dir=None):
         print("No CSV files found in the specified directory.")
         return False
 
-    # Create schemas directory if it doesn't exist
     os.makedirs(schema_dir, exist_ok=True)
 
-    # Process each CSV file
     for filename in csv_files:
         csv_path = os.path.join(bucket_path, filename)
         schema = get_bigquery_schema(csv_path)
         print(f"\n{filename}:")
 
-        # Save the schema to a file
         schema_filename = os.path.splitext(filename)[0] + ".json"
         schema_path = os.path.join(schema_dir, schema_filename)
 
@@ -223,5 +260,4 @@ def generate_schemas(bucket_path=None, schema_dir=None):
 
 
 if __name__ == "__main__":
-    # If run directly, use default paths
     generate_schemas()
