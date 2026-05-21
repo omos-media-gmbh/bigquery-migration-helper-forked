@@ -7,7 +7,7 @@ from config_loader import get_config
 
 
 def replace_bigquery_schemas(
-    project_id=None, dataset=None, schema_dir=None
+    project_id=None, dataset=None, schema_dir=None, table_filter=None
 ):
     """
     Replace BigQuery tables with new schemas.
@@ -17,6 +17,7 @@ def replace_bigquery_schemas(
         project_id (str): Google Cloud project ID
         dataset (str): BigQuery dataset name
         schema_dir (str): Directory containing schema JSON files
+        table_filter (list): Optional list of table names to process. If None, all tables are processed.
 
     Returns:
         bool: True if successful, False otherwise
@@ -47,7 +48,15 @@ def replace_bigquery_schemas(
         print(f"No schema files found in {schema_dir}")
         return False
 
-    print(f"Found {len(schema_files)} schema files to process")
+    if table_filter:
+        schema_files = [f for f in schema_files
+                        if os.path.basename(f).replace(".json", "") in table_filter]
+        if not schema_files:
+            print(f"No matching schema files found for: {', '.join(table_filter)}")
+            return False
+        print(f"Filtering to {len(schema_files)} table(s): {', '.join(table_filter)}")
+    else:
+        print(f"Found {len(schema_files)} schema files to process")
 
     success_count = 0
     error_count = 0

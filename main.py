@@ -117,13 +117,19 @@ def replace_schemas():
         input("Press Enter to return to main menu...")
         return
 
+    # Ask for table filter
+    table_filter_input = input(
+        "Enter specific table names to process (comma-separated), or leave empty for all: "
+    ).strip()
+    table_filter = [t.strip() for t in table_filter_input.split(",") if t.strip()] or None
+
     # Load and run replace_schema_bq module
     try:
         replace_schema_module = load_module("replace_schema_bq.py", "replace_schema_bq")
         if replace_schema_module:
             print(f"Using schema directory: {schema_dir}")
             result = replace_schema_module.replace_bigquery_schemas(
-                project_id, dataset, schema_dir
+                project_id, dataset, schema_dir, table_filter
             )
             if not result:
                 print(
@@ -237,6 +243,12 @@ def setup_transfers():
     )
     test_suffix = suffix_input in ["", "y", "yes"] if suffix_input else config.get_add_test_suffix()
 
+    # Ask for table filter
+    table_filter_input = input(
+        "Enter specific table names to process (comma-separated), or leave empty for all: "
+    ).strip()
+    table_filter = [t.strip() for t in table_filter_input.split(",") if t.strip()] or None
+
     # Load and run setup_transfers_bq module
     try:
         transfers_module = load_module("setup_transfers_bq.py", "setup_transfers_bq")
@@ -255,6 +267,7 @@ def setup_transfers():
                 skip_rows,
                 disposition,
                 test_suffix,
+                table_filter,
             )
             if not result:
                 print(

@@ -90,14 +90,14 @@ def create_transfer(project_id, transfer_location, dataset, base_name, s3_bucket
         print(f"❌ Error processing {table_name}: {str(e)}")
         return False
 
-def setup_transfers(project_id=None, transfer_location=None, 
-                   dataset=None, schema_dir=None, 
-                   s3_bucket=None, 
-                   access_key_id=None, 
-                   secret_access_key=None, 
-                   file_format=None, field_delimiter=None, 
-                   skip_leading_rows=None, write_disposition=None, 
-                   test_suffix=None):
+def setup_transfers(project_id=None, transfer_location=None,
+                   dataset=None, schema_dir=None,
+                   s3_bucket=None,
+                   access_key_id=None,
+                   secret_access_key=None,
+                   file_format=None, field_delimiter=None,
+                   skip_leading_rows=None, write_disposition=None,
+                   test_suffix=None, table_filter=None):
     """
     Set up BigQuery transfer configurations for S3 CSV files.
     
@@ -114,7 +114,8 @@ def setup_transfers(project_id=None, transfer_location=None,
         skip_leading_rows (str): Number of rows to skip (default: 1)
         write_disposition (str): Write disposition (default: WRITE_TRUNCATE)
         test_suffix (bool): Whether to add _test suffix to table names
-    
+        table_filter (list): Optional list of table names to process. If None, all tables are processed.
+
     Returns:
         bool: True if all transfers were processed successfully, False otherwise
     """
@@ -173,8 +174,18 @@ def setup_transfers(project_id=None, transfer_location=None,
         print(f"No schema files found in {schema_dir}")
         return False
     
+    if table_filter:
+        schema_files = [f for f in schema_files
+                        if os.path.basename(f).replace(".json", "") in table_filter]
+        if not schema_files:
+            print(f"No matching schema files found for: {', '.join(table_filter)}")
+            return False
+
     total_files = len(schema_files)
-    print(f"Found {total_files} schema files to process")
+    if table_filter:
+        print(f"Filtering to {total_files} table(s): {', '.join(table_filter)}")
+    else:
+        print(f"Found {total_files} schema files to process")
     
     print("⚠️ NOTE: You may need to authenticate for each transfer.")
     print("This process may require multiple authentication steps.")
