@@ -19,14 +19,19 @@ jobs:
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Check for failed transfers
+      - name: Check for failed transfers and diagnose
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           PROJECT_ID="metaflow-data"
           TRANSFER_LOCATION="europe"
+          DATASET="metaflow_application"
+          S3_BUCKET="prod-metaflow-db-export-bucket"
 
-          FAILED=$(bq ls --transfer_config --transfer_location="$TRANSFER_LOCATION" --project_id="$PROJECT_ID" --format=json 2>&1 | python3 -c "
+          # Find failed transfers (only output safe fields)
+          FAILED=$(bq ls --transfer_config --transfer_location="$TRANSFER_LOCATION" --project_id="$PROJECT_ID" --format=json 2>/dev/null | python3 -c "
           import json, sys
 
           try:
@@ -53,23 +58,110 @@ jobs:
           fi
 
           FAIL_COUNT=$(echo "$FAILED" | wc -l | tr -d ' ')
-          TABLE_LIST=""
-          while IFS='|' read -r name updated; do
-            TABLE_LIST="${TABLE_LIST}• ${name} (last updated: ${updated})\n"
-          done <<< "$FAILED"
+          echo "Found ${FAIL_COUNT} failed transfer(s), diagnosing..."
 
-          MESSAGE=$(cat <<EOF
-          🚨 *BigQuery Data Transfers Alert* — ${FAIL_COUNT} failed BigQuery data transfer(s) detected
+          # Diagnose each failed transfer
+          DIAGNOSIS=$(echo "$FAILED" | while IFS='|' read -r table_name updated; do
+            echo "---DIAG_START---"
+            echo "TABLE:${table_name}"
+            echo "UPDATED:${updated}"
 
-          $(echo -e "$TABLE_LIST")
+            # Get BQ schema columns
+            BQ_COLS=$(bq show --schema --project_id="$PROJECT_ID" "${DATASET}.${table_name}" 2>/dev/null | python3 -c "
+          import json, sys
+          try:
+              schema = json.load(sys.stdin)
+              for f in schema:
+                  print(f['name'])
+          except:
+              pass
+          " 2>/dev/null)
 
-          Fix with:
-          \`\`\`python3 fix_tables.py <table_names>\`\`\`
-          EOF
-          )
+            # Get S3 CSV header columns
+            S3_COLS=$(aws s3 cp "s3://${S3_BUCKET}/${table_name}.csv" - 2>/dev/null | head -1 | tr ';' '\n')
 
+            if [ -z "$BQ_COLS" ]; then
+              echo "BQ_COUNT:unknown"
+              echo "S3_COUNT:unknown"
+              echo "STATUS:Could not read BQ schema"
+            elif [ -z "$S3_COLS" ]; then
+              echo "BQ_COUNT:$(echo "$BQ_COLS" | wc -l | tr -d ' ')"
+              echo "S3_COUNT:unknown"
+              echo "STATUS:Could not read S3 CSV header"
+            else
+              BQ_COUNT=$(echo "$BQ_COLS" | wc -l | tr -d ' ')
+              S3_COUNT=$(echo "$S3_COLS" | wc -l | tr -d ' ')
+              echo "BQ_COUNT:${BQ_COUNT}"
+              echo "S3_COUNT:${S3_COUNT}"
+
+              if [ "$BQ_COUNT" -eq "$S3_COUNT" ]; then
+                echo "STATUS:Column count matches (${BQ_COUNT}) — issue may be data types or data content"
+              else
+                # Find columns in S3 but not in BQ
+                MISSING=$(comm -23 <(echo "$S3_COLS" | sort) <(echo "$BQ_COLS" | sort) | tr '\n' ', ' | sed 's/,$//')
+                # Find columns in BQ but not in S3
+                EXTRA=$(comm -13 <(echo "$S3_COLS" | sort) <(echo "$BQ_COLS" | sort) | tr '\n' ', ' | sed 's/,$//')
+
+                if [ -n "$MISSING" ]; then
+                  echo "MISSING_IN_BQ:${MISSING}"
+                fi
+                if [ -n "$EXTRA" ]; then
+                  echo "EXTRA_IN_BQ:${EXTRA}"
+                fi
+                echo "STATUS:Schema mismatch — S3 has ${S3_COUNT} columns, BQ has ${BQ_COUNT}"
+              fi
+            fi
+            echo "---DIAG_END---"
+          done)
+
+          # Build Slack message from diagnosis
+          MESSAGE=$(echo "$DIAGNOSIS" | python3 -c "
+          import sys
+
+          lines = sys.stdin.read().strip().split('\n')
+          tables = []
+          current = {}
+
+          for line in lines:
+              if line == '---DIAG_START---':
+                  current = {}
+              elif line == '---DIAG_END---':
+                  if current:
+                      tables.append(current)
+              elif ':' in line:
+                  key, _, value = line.partition(':')
+                  current[key] = value
+
+          parts = []
+          parts.append(f':rotating_light: *BigQuery Data Transfers Alert* — {len(tables)} failed transfer(s)\n')
+
+          fix_tables = []
+          for t in tables:
+              name = t.get('TABLE', 'unknown')
+              status = t.get('STATUS', 'unknown')
+              bq_count = t.get('BQ_COUNT', '?')
+              s3_count = t.get('S3_COUNT', '?')
+              missing = t.get('MISSING_IN_BQ', '')
+              extra = t.get('EXTRA_IN_BQ', '')
+
+              parts.append(f'*\`{name}\`* — {status}')
+              if missing:
+                  parts.append(f'  + New in S3: \`{missing}\`')
+              if extra:
+                  parts.append(f'  - Removed from S3: \`{extra}\`')
+              parts.append('')
+              fix_tables.append(name)
+
+          table_args = ' '.join(fix_tables)
+          parts.append('Fix with:')
+          parts.append(f'\`\`\`python3 fix_tables.py {table_args}\`\`\`')
+
+          print('\n'.join(parts))
+          ")
+
+          # Post to Slack
           curl -s -X POST -H 'Content-type: application/json' \
-            --data "$(python3 -c "import json,sys; print(json.dumps({'text': sys.stdin.read()}))" <<< "$MESSAGE")" \
+            --data "$(echo "$MESSAGE" | python3 -c "import json,sys; print(json.dumps({'text': sys.stdin.read()}))")" \
             "$SLACK_WEBHOOK_URL"
 
           echo "Posted ${FAIL_COUNT} failure(s) to Slack"
