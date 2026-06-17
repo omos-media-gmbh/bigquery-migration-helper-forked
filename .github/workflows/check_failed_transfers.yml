@@ -26,14 +26,11 @@ jobs:
           PROJECT_ID="metaflow-data"
           TRANSFER_LOCATION="europe"
 
-          echo "Listing transfers for project=$PROJECT_ID location=$TRANSFER_LOCATION"
           TRANSFERS=$(bq ls --transfer_config --transfer_location="$TRANSFER_LOCATION" --project_id="$PROJECT_ID" --format=json 2>&1)
-          echo "bq exit code: $?"
-          echo "bq output length: ${#TRANSFERS}"
-          echo "bq output (first 500 chars): ${TRANSFERS:0:500}"
 
           if [ -z "$TRANSFERS" ] || [ "$TRANSFERS" = "[]" ]; then
             echo "No transfers found or bq command failed."
+            echo "$TRANSFERS"
             exit 1
           fi
 
@@ -44,13 +41,13 @@ jobs:
           failed = [t for t in data if t.get('state') == 'FAILED']
 
           if not failed:
-              sys.exit(1)
+              sys.exit(0)
 
           for t in sorted(failed, key=lambda x: x.get('displayName', '')):
               name = t.get('displayName', 'unknown')
               updated = t.get('updateTime', 'unknown')
               print(f'{name}|{updated}')
-          " 2>/dev/null)
+          ")
 
           if [ -z "$FAILED" ]; then
             echo "All transfers healthy ✅"
