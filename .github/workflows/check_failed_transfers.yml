@@ -26,22 +26,20 @@ jobs:
           PROJECT_ID="metaflow-data"
           TRANSFER_LOCATION="europe"
 
-          TRANSFERS=$(bq ls --transfer_config --transfer_location="$TRANSFER_LOCATION" --project_id="$PROJECT_ID" --format=json 2>&1)
-
-          if [ -z "$TRANSFERS" ] || [ "$TRANSFERS" = "[]" ]; then
-            echo "No transfers found or bq command failed."
-            echo "$TRANSFERS"
-            exit 1
-          fi
-
-          FAILED=$(echo "$TRANSFERS" | python3 -c "
+          FAILED=$(bq ls --transfer_config --transfer_location="$TRANSFER_LOCATION" --project_id="$PROJECT_ID" --format=json 2>&1 | python3 -c "
           import json, sys
 
-          data = json.load(sys.stdin)
-          failed = [t for t in data if t.get('state') == 'FAILED']
+          try:
+              data = json.load(sys.stdin)
+          except json.JSONDecodeError:
+              print('ERROR: bq command did not return valid JSON', file=sys.stderr)
+              sys.exit(1)
 
-          if not failed:
-              sys.exit(0)
+          if not data:
+              print('ERROR: no transfers found', file=sys.stderr)
+              sys.exit(1)
+
+          failed = [t for t in data if t.get('state') == 'FAILED']
 
           for t in sorted(failed, key=lambda x: x.get('displayName', '')):
               name = t.get('displayName', 'unknown')
