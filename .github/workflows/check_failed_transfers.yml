@@ -1,0 +1,76 @@
+name: Check BigQuery Transfer Failures
+
+on:
+  schedule:
+    # 8:30 UTC = 9:30 CET
+    - cron: '30 8 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  check-transfers:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Authenticate with GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Check for failed transfers
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          PROJECT_ID="metaflow-data"
+          TRANSFER_LOCATION="eu"
+
+          TRANSFERS=$(bq ls --transfer_config --transfer_location="$TRANSFER_LOCATION" --project_id="$PROJECT_ID" --format=json 2>/dev/null)
+
+          if [ -z "$TRANSFERS" ] || [ "$TRANSFERS" = "[]" ]; then
+            echo "No transfers found or bq command failed."
+            exit 1
+          fi
+
+          FAILED=$(echo "$TRANSFERS" | python3 -c "
+          import json, sys
+
+          data = json.load(sys.stdin)
+          failed = [t for t in data if t.get('state') == 'FAILED']
+
+          if not failed:
+              sys.exit(1)
+
+          for t in sorted(failed, key=lambda x: x.get('displayName', '')):
+              name = t.get('displayName', 'unknown')
+              updated = t.get('updateTime', 'unknown')
+              print(f'{name}|{updated}')
+          " 2>/dev/null)
+
+          if [ -z "$FAILED" ]; then
+            echo "All transfers healthy ✅"
+            exit 0
+          fi
+
+          FAIL_COUNT=$(echo "$FAILED" | wc -l | tr -d ' ')
+          TABLE_LIST=""
+          while IFS='|' read -r name updated; do
+            TABLE_LIST="${TABLE_LIST}• ${name} (last updated: ${updated})\n"
+          done <<< "$FAILED"
+
+          MESSAGE=$(cat <<EOF
+          🚨 *BigQuery Data Transfers Alert* — ${FAIL_COUNT} failed BigQuery data transfer(s) detected
+
+          $(echo -e "$TABLE_LIST")
+
+          Fix with:
+          \`\`\`python3 fix_tables.py <table_names>\`\`\`
+          EOF
+          )
+
+          curl -s -X POST -H 'Content-type: application/json' \
+            --data "$(python3 -c "import json,sys; print(json.dumps({'text': sys.stdin.read()}))" <<< "$MESSAGE")" \
+            "$SLACK_WEBHOOK_URL"
+
+          echo "Posted ${FAIL_COUNT} failure(s) to Slack"
