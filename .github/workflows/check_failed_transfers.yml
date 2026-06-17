@@ -26,7 +26,11 @@ jobs:
           PROJECT_ID="metaflow-data"
           TRANSFER_LOCATION="europe"
 
-          TRANSFERS=$(bq ls --transfer_config --transfer_location="$TRANSFER_LOCATION" --project_id="$PROJECT_ID" --format=json 2>/dev/null)
+          echo "Listing transfers for project=$PROJECT_ID location=$TRANSFER_LOCATION"
+          TRANSFERS=$(bq ls --transfer_config --transfer_location="$TRANSFER_LOCATION" --project_id="$PROJECT_ID" --format=json 2>&1)
+          echo "bq exit code: $?"
+          echo "bq output length: ${#TRANSFERS}"
+          echo "bq output (first 500 chars): ${TRANSFERS:0:500}"
 
           if [ -z "$TRANSFERS" ] || [ "$TRANSFERS" = "[]" ]; then
             echo "No transfers found or bq command failed."
