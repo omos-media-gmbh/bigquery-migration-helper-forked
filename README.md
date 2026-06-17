@@ -1,8 +1,37 @@
-# BigQuery Migration Helper
+# BigQuery Migration Helper (Fork)
+
+> **This is a fork of [patrk-omos/bigquery-migration-helper](https://github.com/patrk-omos/bigquery-migration-helper)** with added tooling for monitoring and fixing broken BigQuery data transfers.
+
+## What this fork adds
+
+- **Table-specific fixes**: Replace schemas and transfers for specific tables without touching the rest of the dataset (via `table_filter` in menu options 4 and 5)
+- **One-command fix script**: `fix_tables.py` — downloads CSV from S3, regenerates the schema, and replaces the BQ table in a single command
+- **Automated failure monitoring**: A GitHub Actions workflow that runs daily at 9:30 CET, checks for failed BigQuery data transfers, diagnoses schema mismatches (comparing S3 CSV headers against BQ table schemas), and posts alerts to Slack
+- **Configurable transfer schedule**: Transfer schedule now uses `config.json` instead of being hardcoded
+
+### Quick fix for broken tables
+
+```bash
+python3 fix_tables.py account_userprofile community_group
+```
+
+This downloads the CSVs from S3, regenerates schemas, and replaces only the specified BQ tables. Existing transfers pick up the new schema on their next scheduled run — no need to recreate them.
+
+### GitHub Actions monitoring
+
+The workflow at `.github/workflows/check_failed_transfers.yml` requires these repository secrets:
+- `GCP_SERVICE_ACCOUNT_KEY` — GCP service account JSON key with BigQuery permissions
+- `SLACK_WEBHOOK_URL` — Slack incoming webhook for the alerts channel
+- `AWS_ACCESS_KEY_ID` — AWS access key (read-only, for downloading CSV headers to diagnose mismatches)
+- `AWS_SECRET_ACCESS_KEY` — AWS secret key
+
+---
+
+## Original README
 
 A comprehensive Python tool for migrating CSV data from AWS S3 to Google Cloud BigQuery. This tool automates the entire migration pipeline including data extraction, schema generation, validation, and transfer setup.
 
-## 🚀 Features
+## Features
 
 - **S3 Data Extraction**: Copy CSV files from AWS S3 buckets to local storage
 - **Smart Schema Generation**: Automatically generate BigQuery schemas from CSV files with intelligent data type inference
@@ -163,8 +192,12 @@ bigquery-migration-helper/
 ├── check_csv_structure.py    # CSV validation
 ├── check_schemas.py          # Schema validation
 ├── fix_csv_newlines.py       # CSV cleaning
+├── fix_tables.py             # One-command table fix (fork addition)
 ├── replace_schema_bq.py      # BigQuery table management
 ├── setup_transfers_bq.py     # Transfer configuration
+├── check_failed_transfers.sh # Local transfer failure check (fork addition)
+├── .github/workflows/        # GitHub Actions (fork addition)
+│   └── check_failed_transfers.yml  # Daily transfer monitoring
 ├── config.json               # Configuration settings
 ├── .env.example              # Environment variable template
 ├── .env                      # Your credentials (create from .env.example)
