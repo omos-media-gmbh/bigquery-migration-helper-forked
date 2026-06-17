@@ -24,7 +24,7 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           PROJECT_ID="metaflow-data"
-          TRANSFER_LOCATION="eu"
+          TRANSFER_LOCATION="europe"
 
           TRANSFERS=$(bq ls --transfer_config --transfer_location="$TRANSFER_LOCATION" --project_id="$PROJECT_ID" --format=json 2>/dev/null)
 

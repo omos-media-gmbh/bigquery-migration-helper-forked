@@ -18,7 +18,7 @@ fi
 
 SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
 PROJECT_ID="${GCP_PROJECT_ID:-metaflow-data}"
-TRANSFER_LOCATION="eu"
+TRANSFER_LOCATION="europe"
 
 if [ -z "$SLACK_WEBHOOK_URL" ]; then
     echo "Error: SLACK_WEBHOOK_URL is not set."
