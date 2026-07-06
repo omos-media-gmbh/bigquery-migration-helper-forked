@@ -7,10 +7,21 @@ on:
   workflow_dispatch: # Allow manual trigger
 
 jobs:
-  check-transfers:
+  check-and-fix:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install python-dotenv
+
       - name: Authenticate with GCP
         uses: google-github-actions/auth@v2
         with:
@@ -19,11 +30,16 @@ jobs:
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Check for failed transfers and diagnose
+      - name: Check for failed transfers, fix, and trigger dbt
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          GCP_PROJECT_ID: metaflow-data
+          BQ_DATASET: metaflow_application
+          TRANSFER_LOCATION: europe
+          S3_BUCKET: prod-metaflow-db-export-bucket
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           PROJECT_ID="metaflow-data"
           TRANSFER_LOCATION="europe"
@@ -60,13 +76,15 @@ jobs:
           FAIL_COUNT=$(echo "$FAILED" | wc -l | tr -d ' ')
           echo "Found ${FAIL_COUNT} failed transfer(s), diagnosing..."
 
+          # Collect table names for fix
+          TABLE_NAMES=$(echo "$FAILED" | cut -d'|' -f1 | tr '\n' ' ' | sed 's/ $//')
+
           # Diagnose each failed transfer
           DIAGNOSIS=$(echo "$FAILED" | while IFS='|' read -r table_name updated; do
             echo "---DIAG_START---"
             echo "TABLE:${table_name}"
             echo "UPDATED:${updated}"
 
-            # Get BQ schema columns
             BQ_COLS=$(bq show --schema --project_id="$PROJECT_ID" "${DATASET}.${table_name}" 2>/dev/null | python3 -c "
           import json, sys
           try:
@@ -77,7 +95,6 @@ jobs:
               pass
           " 2>/dev/null)
 
-            # Get S3 CSV header columns
             S3_COLS=$(aws s3 cp "s3://${S3_BUCKET}/${table_name}.csv" - 2>/dev/null | head -1 | tr ';' '\n')
 
             if [ -z "$BQ_COLS" ]; then
@@ -97,9 +114,7 @@ jobs:
               if [ "$BQ_COUNT" -eq "$S3_COUNT" ]; then
                 echo "STATUS:Column count matches (${BQ_COUNT}) — issue may be data types or data content"
               else
-                # Find columns in S3 but not in BQ
                 MISSING=$(comm -23 <(echo "$S3_COLS" | sort) <(echo "$BQ_COLS" | sort) | tr '\n' ', ' | sed 's/,$//')
-                # Find columns in BQ but not in S3
                 EXTRA=$(comm -13 <(echo "$S3_COLS" | sort) <(echo "$BQ_COLS" | sort) | tr '\n' ', ' | sed 's/,$//')
 
                 if [ -n "$MISSING" ]; then
@@ -114,7 +129,7 @@ jobs:
             echo "---DIAG_END---"
           done)
 
-          # Build Slack message from diagnosis
+          # Build Slack diagnosis message
           MESSAGE=$(echo "$DIAGNOSIS" | python3 -c "
           import sys
 
@@ -133,14 +148,11 @@ jobs:
                   current[key] = value
 
           parts = []
-          parts.append(f':rotating_light: *BigQuery Data Transfers Alert* — {len(tables)} failed transfer(s)\n')
+          parts.append(':rotating_light: *BigQuery Data Transfers Alert* — auto-fixing {len(tables)} failed transfer(s)\n')
 
-          fix_tables = []
           for t in tables:
               name = t.get('TABLE', 'unknown')
               status = t.get('STATUS', 'unknown')
-              bq_count = t.get('BQ_COUNT', '?')
-              s3_count = t.get('S3_COUNT', '?')
               missing = t.get('MISSING_IN_BQ', '')
               extra = t.get('EXTRA_IN_BQ', '')
 
@@ -150,18 +162,63 @@ jobs:
               if extra:
                   parts.append(f'  - Removed from S3: \`{extra}\`')
               parts.append('')
-              fix_tables.append(name)
 
-          table_args = ' '.join(fix_tables)
-          parts.append('Fix with:')
-          parts.append(f'\`\`\`python3 fix_tables.py {table_args}\`\`\`')
+          parts.append(':wrench: Running fix_tables.py and triggering dbt build automatically...')
 
           print('\n'.join(parts))
           ")
 
-          # Post to Slack
           curl -s -X POST -H 'Content-type: application/json' \
             --data "$(echo "$MESSAGE" | python3 -c "import json,sys; print(json.dumps({'text': sys.stdin.read()}))")" \
             "$SLACK_WEBHOOK_URL"
 
-          echo "Posted ${FAIL_COUNT} failure(s) to Slack"
+          # Run fix_tables.py
+          echo "Running: python3 fix_tables.py ${TABLE_NAMES}"
+          python3 fix_tables.py ${TABLE_NAMES}
+          FIX_EXIT=$?
+
+          if [ $FIX_EXIT -ne 0 ]; then
+            curl -s -X POST -H 'Content-type: application/json' \
+              --data "$(python3 -c "import json; print(json.dumps({'text': ':x: fix_tables.py failed — manual intervention needed'}))")" \
+              "$SLACK_WEBHOOK_URL"
+            exit 1
+          fi
+
+          # Trigger manual backfill of the transfers (start a run now)
+          echo "Triggering backfill for fixed transfers..."
+          for table_name in ${TABLE_NAMES}; do
+            CONFIG_ID=$(bq ls --transfer_config --transfer_location="$TRANSFER_LOCATION" --project_id="$PROJECT_ID" --format=json 2>/dev/null | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          for t in data:
+              if t.get('displayName') == '${table_name}':
+                  print(t['name'])
+                  break
+          ")
+            if [ -n "$CONFIG_ID" ]; then
+              echo "Starting transfer run for ${table_name}..."
+              bq mk --transfer_run --run_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CONFIG_ID" 2>/dev/null || true
+            fi
+          done
+
+          # Wait for transfers to complete (check every 30s, max 10 min)
+          echo "Waiting for transfers to load data..."
+          sleep 120
+
+          # Build dbt select string: "table1+ table2+"
+          DBT_SELECT=$(echo "$TABLE_NAMES" | tr ' ' '\n' | sed 's/$/+/' | tr '\n' ' ' | sed 's/ $//')
+          echo "Will trigger dbt build with select: ${DBT_SELECT}"
+
+          # Trigger dbt manual prod run in data-transformation repo
+          curl -s -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_PAT}" \
+            "https://api.github.com/repos/omos-media-gmbh/data-transformation/actions/workflows/gh_actions_dbt_manual_prod.yml/dispatches" \
+            -d "$(python3 -c "import json; print(json.dumps({'ref': 'main', 'inputs': {'select': '${DBT_SELECT}', 'full_refresh': 'false'}}))")"
+
+          # Notify Slack
+          curl -s -X POST -H 'Content-type: application/json' \
+            --data "$(python3 -c "import json; print(json.dumps({'text': ':white_check_mark: Tables fixed and dbt build triggered for: \`${DBT_SELECT}\`'}))")" \
+            "$SLACK_WEBHOOK_URL"
+
+          echo "Done — fix applied and dbt build triggered"
