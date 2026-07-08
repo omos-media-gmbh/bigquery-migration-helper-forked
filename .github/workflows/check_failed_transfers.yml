@@ -2,8 +2,8 @@ name: Check BigQuery Transfer Failures
 
 on:
   schedule:
-    # 8:30 UTC = 9:30 CET
-    - cron: '30 8 * * *'
+    # 3:00 UTC = 5:00 CET — after transfers (00:30) and before dbt prod (04:00)
+    - cron: '0 3 * * *'
   workflow_dispatch: # Allow manual trigger
 
 jobs:
@@ -39,7 +39,6 @@ jobs:
           BQ_DATASET: metaflow_application
           TRANSFER_LOCATION: europe
           S3_BUCKET: prod-metaflow-db-export-bucket
-          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           PROJECT_ID="metaflow-data"
           TRANSFER_LOCATION="europe"
@@ -163,7 +162,7 @@ jobs:
                   parts.append(f'  - Removed from S3: \`{extra}\`')
               parts.append('')
 
-          parts.append(':wrench: Running fix_tables.py and triggering dbt build automatically...')
+          parts.append(':wrench: Running fix_tables.py automatically. The scheduled dbt prod run at 06:00 CET will pick up the fixes.')
 
           print('\n'.join(parts))
           ")
@@ -201,24 +200,10 @@ jobs:
             fi
           done
 
-          # Wait for transfers to complete (check every 30s, max 10 min)
-          echo "Waiting for transfers to load data..."
-          sleep 120
-
-          # Build dbt select string: "table1+ table2+"
-          DBT_SELECT=$(echo "$TABLE_NAMES" | tr ' ' '\n' | sed 's/$/+/' | tr '\n' ' ' | sed 's/ $//')
-          echo "Will trigger dbt build with select: ${DBT_SELECT}"
-
-          # Trigger dbt manual prod run in data-transformation repo
-          curl -s -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_PAT}" \
-            "https://api.github.com/repos/omos-media-gmbh/data-transformation/actions/workflows/gh_actions_dbt_manual_prod.yml/dispatches" \
-            -d "$(python3 -c "import json; print(json.dumps({'ref': 'main', 'inputs': {'select': '${DBT_SELECT}', 'full_refresh': 'false'}}))")"
-
           # Notify Slack
+          FIXED_LIST=$(echo "$TABLE_NAMES" | tr ' ' ', ')
           curl -s -X POST -H 'Content-type: application/json' \
-            --data "$(python3 -c "import json; print(json.dumps({'text': ':white_check_mark: Tables fixed and dbt build triggered for: \`${DBT_SELECT}\`'}))")" \
+            --data "$(python3 -c "import json; print(json.dumps({'text': ':white_check_mark: Tables fixed and backfill triggered: \`${FIXED_LIST}\`. The dbt prod run at 06:00 CET will rebuild downstream models.'}))")" \
             "$SLACK_WEBHOOK_URL"
 
-          echo "Done — fix applied and dbt build triggered"
+          echo "Done — fix applied, dbt prod run at 04:00 UTC will pick up the changes"
