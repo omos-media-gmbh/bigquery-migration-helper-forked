@@ -2,8 +2,8 @@ name: Check BigQuery Transfer Failures
 
 on:
   schedule:
-    # 3:00 UTC = 5:00 CET — after transfers (00:30) and before dbt prod (04:00)
-    - cron: '0 3 * * *'
+    # 2:00 UTC = 4:00 CET — after transfers (00:30) and before dbt prod (04:00)
+    - cron: '0 2 * * *'
   workflow_dispatch: # Allow manual trigger
 
 jobs:
