@@ -208,23 +208,33 @@ def setup_transfers():
 
     # Ask for file format
     default_format = config.get_csv_format()
-    file_format = input(f"Enter file format [default: {default_format}]: ").strip()
+    file_format = input(f"Enter file format (CSV or JSON) [default: {default_format}]: ").strip()
     if not file_format:
         file_format = default_format
 
-    # Ask for field delimiter
-    default_delimiter = config.get_csv_delimiter()
-    delimiter = input(f"Enter field delimiter [default: {default_delimiter}]: ").strip()
-    if not delimiter:
-        delimiter = default_delimiter
+    is_json = file_format.upper() == "JSON"
 
-    # Ask for skip leading rows
-    default_skip = config.get_skip_leading_rows()
-    skip_rows = input(
-        f"Enter number of rows to skip [default: {default_skip}]: "
-    ).strip()
-    if not skip_rows:
-        skip_rows = default_skip
+    if is_json:
+        delimiter = None
+        skip_rows = None
+        data_path = input(
+            "Enter S3 data path with wildcard (e.g. s3://bucket/folder/*.jsonl), or leave empty for auto: "
+        ).strip() or None
+    else:
+        data_path = None
+        # Ask for field delimiter
+        default_delimiter = config.get_csv_delimiter()
+        delimiter = input(f"Enter field delimiter [default: {default_delimiter}]: ").strip()
+        if not delimiter:
+            delimiter = default_delimiter
+
+        # Ask for skip leading rows
+        default_skip = config.get_skip_leading_rows()
+        skip_rows = input(
+            f"Enter number of rows to skip [default: {default_skip}]: "
+        ).strip()
+        if not skip_rows:
+            skip_rows = default_skip
 
     # Ask for write disposition
     default_disposition = config.get_write_disposition()
@@ -268,6 +278,7 @@ def setup_transfers():
                 disposition,
                 test_suffix,
                 table_filter,
+                data_path=data_path,
             )
             if not result:
                 print(
